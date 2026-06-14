@@ -1,145 +1,167 @@
 import serial
 import matplotlib.pyplot as plt
 from collections import deque
+import time
 
-# ==========================================
-# SERIAL SETTINGS
-# ==========================================
+# =====================================
+# TIMING & THROTTLING CONFIGURATION
+# =====================================
+last_plot_time = time.time()
+PLOT_INTERVAL = 0.05  # Restricts UI updates to 20 FPS (prevents CPU lockup)
+
+# =====================================
+# UART SETTINGS
+# =====================================
 ser = serial.Serial(
-    port='COM5',      # Change to your COM port
+    port='COM5',
     baudrate=115200,
     timeout=1
 )
 
-# ==========================================
-# PLOT SETTINGS
-# ==========================================
-WINDOW_SECONDS = 10
-# Fixed display window
+# =====================================
+# DISPLAY SETTINGS
+# =====================================
 DISPLAY_SAMPLES = 1000
 
-x_data = deque(range(DISPLAY_SAMPLES), maxlen=DISPLAY_SAMPLES)
-y_data = deque([0]*DISPLAY_SAMPLES, maxlen=DISPLAY_SAMPLES)
-# Dark theme
-plt.style.use('dark_background')
+# =====================================
+# CONFIGURATION BUFFERS (Historical Data)
+# =====================================
+config_buffers = {
+    1: [],
+    2: [],
+    3: [],
+    4: [],
+    5: [],
+    6: []
+}
 
-plt.ion()
+# =====================================
+# OSCILLOSCOPE BUFFER (Rolling View)
+# =====================================
+y_data = deque(
+    [0] * DISPLAY_SAMPLES,
+    maxlen=DISPLAY_SAMPLES
+)
+
+# =====================================
+# PLOT SETUP
+# =====================================
+plt.style.use('dark_background')
+plt.ion()  # Turn on interactive mode
 
 fig, ax = plt.subplots(figsize=(14, 6))
 
-line, = ax.plot(x_data, y_data, lw=2)
+line, = ax.plot(
+    range(DISPLAY_SAMPLES),
+    list(y_data),
+    lw=2,
+    color='#00FFCC'  # Clear, bright color for dark background
+)
 
 ax.set_xlim(0, DISPLAY_SAMPLES)
-ax.set_ylim(0, 4095)  # ESP32 ADC range
+ax.set_ylim(0, 4095)
 
-ax.set_title("Real-Time Bioimpedance Signal")
-ax.set_xlabel("Time (s)")
+ax.set_title("Waiting For Data...", fontsize=12)
+ax.set_xlabel("Samples")
 ax.set_ylabel("BIOZI")
-ax.grid(True, alpha=0.3)
+ax.grid(True, alpha=0.2)
 
-print("Listening to ESP32...")
+# =====================================
+# STATE VARIABLES
+# =====================================
+current_config = None
+
+print("Listening... (Close the GUI window to stop safely)")
 
 try:
-
-    while True:
-
+    # Safely loops only while the Matplotlib window is actively open
+    while plt.fignum_exists(fig.number):
+        
         raw = ser.readline()
-
         if not raw:
             continue
 
-        line_text = raw.decode(
-            'utf-8',
-            errors='ignore'
-        ).strip()
-
-        # ----------------------------------
-        # Skip Configuration Messages
-        # ----------------------------------
-        if line_text.startswith("Config"):
-            print(line_text)
-            continue
-
-        # ----------------------------------
-        # Expected format:
-        # Config,Timestamp,BIOZI
-        # Example:
-        # 1,12345,2048
-        # ----------------------------------
-        fields = line_text.split(',')
-
-        if len(fields) != 3:
-            continue
-
         try:
+            # Parse incoming text string
+            line_text = raw.decode('utf-8', errors='ignore').strip()
+            fields = line_text.split(',')
+            
+            if len(fields) != 3:
+                continue
 
             config = int(fields[0])
             timestamp = int(fields[1])
             biozi = int(fields[2])
-
-        except ValueError:
+            
+        except (ValueError, IndexError):
+            # Gracefully ignore poorly formatted packets, don't crash
             continue
 
-        print(
-            f"Cfg={config} | "
-            f"Time={timestamp} | "
-            f"BIOZI={biozi}"
-        )
+        # =====================================
+        # CONFIGURATION CHANGE DETECTION
+        # =====================================
+        if current_config is None:
+            current_config = config
+            print(f"\nStarted Config {config}")
 
-        # ----------------------------------
-        # Add New Sample
-        # ----------------------------------
+        elif config != current_config:
+            print(f"\nConfig {current_config} Completed")
+            print(f"Samples Stored = {len(config_buffers[current_config])}")
+            print(f"Started Config {config}")
+
+            # Clear oscilloscope display buffer cleanly back to baseline
+            y_data.clear()
+            y_data.extend([0] * DISPLAY_SAMPLES)
+            
+            current_config = config
+
+        # =====================================
+        # STORE DATA IN STATIC ARRAYS
+        # =====================================
+        if config in config_buffers:
+            config_buffers[config].append(biozi)
+
+        # Always feed the live rolling real-time buffer
         y_data.append(biozi)
 
-        line.set_ydata(list(y_data))
+        # =====================================
+        # REAL-TIME DISPLAY (RATE LIMITED)
+        # =====================================
+        current_plot_time = time.time()
+        
+        if current_plot_time - last_plot_time > PLOT_INTERVAL:
+            
+            # 1. Convert to list once per frame update
+            y_list = list(y_data)
+            line.set_ydata(y_list)
+            
+            # 2. Heavy text/font engine manipulations happen only 20 times/sec
+            ax.set_title(f"Bioimpedance Signal | Config {config}", fontsize=12)
 
-        fig.canvas.draw_idle()
-        fig.canvas.flush_events()
-        if len(x_data) > 1:
+            # 3. Dynamic axis limit calculations
+            ymin, ymax = min(y_list), max(y_list)
+            margin = max((ymax - ymin) * 0.1, 1)
+            ax.set_ylim(ymin - margin, ymax + margin)
 
-            current_time = x_data[-1]
-
-            line.set_xdata(list(x_data))
-            line.set_ydata(list(y_data))
-
-            # ----------------------------------
-            # Scrolling Window
-            # ----------------------------------
-            ax.set_xlim(
-                max(0, current_time - WINDOW_SECONDS),
-                current_time
-            )
-
-            # ----------------------------------
-            # Auto Scale Y Axis
-            # ----------------------------------
-            ymin = min(y_data)
-            ymax = max(y_data)
-
-            margin = (ymax - ymin) * 0.1
-
-            if margin < 1:
-                margin = 1
-
-            ax.set_ylim(
-                ymin - margin,
-                ymax + margin
-            )
-
-            ax.set_title(
-                f"Real-Time Bioimpedance Signal | Config {config}"
-            )
-
-            fig.canvas.draw_idle()
-            fig.canvas.flush_events()
+            # 4. Canvas interaction & rendering safely isolated
+            try:
+                fig.canvas.draw_idle()
+                fig.canvas.flush_events()
+            except Exception:
+                # Catch rare window manipulation errors (like dragging/minimizing)
+                pass
+                
+            last_plot_time = current_plot_time
 
 except KeyboardInterrupt:
-
-    print("\nStopped by user.")
+    print("\nStopped By User via Terminal Interrupt")
 
 finally:
-
+    # Cleanup resources perfectly on exit
     ser.close()
     plt.close('all')
 
-    print("Serial Port Closed.")
+    print("\n========== SUMMARY ==========")
+    for cfg in config_buffers:
+        print(f"Config {cfg}: {len(config_buffers[cfg])} samples")
+    print("=============================")
