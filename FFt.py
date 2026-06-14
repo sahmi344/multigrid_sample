@@ -10,7 +10,7 @@ files = [
     "C5.csv"
 ]
 
-Fs = 392
+Fs = 391
 
 fig, axes = plt.subplots(3, 2, figsize=(14, 10))
 
